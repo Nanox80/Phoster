@@ -1,0 +1,172 @@
+CHANGES TO THE PROJECT ROADMAP
+==============================
+
+DSSC Pigment Recommender, roadmap dated 19 Nov 2026.
+This file lists what changed from that roadmap, and why.
+The end goal and success target are unchanged: coordinates in Malaysia in,
+ranked chlorophyll / anthocyanin / curcumin mixes out, the top pick
+reaching >= 85% of the best mix.
+
+
+THE MAIN CHANGE IN ONE PARAGRAPH
+--------------------------------
+The roadmap trained an ML model on simulated data (Phase 4), then used that
+model to rank mixes (Phase 5). We now rank mixes with the physics simulator
+directly, and the ML model moves to after the lab experiment, where it
+learns only a small, capped correction from real cells. Reason: an ML model
+trained only on the simulator's output can at best copy the simulator. It
+adds error but no new knowledge, and the simulator is already fast enough
+(all 231 mixes in about 6 ms). Real knowledge only arrives in Phase 7, so
+that is where ML earns its place.
+
+
+CHANGE 1  Recommendations use the simulator directly (Phases 4 and 5)
+-----------------------------------------------------------------------
+Before: Phase 4 trains a Gaussian process / random forest on
+        data/sim/, and Phase 5 runs all 231 mixes through that model.
+Now:    Phase 5 (model/recommend.py) runs all 231 mixes through the
+        simulator itself, 500 Monte Carlo runs, about 3-5 seconds.
+
+Why:
+  - Exact instead of approximate: no fitting error on top of the physics.
+  - Behaves sensibly in unusual light (a narrow blue LED, low sun),
+    where an ML copy would be guessing outside its training data.
+  - Explainable: every number comes from a physical setting
+    ("anthocyanin's success rate is 18%"), useful for the CREST report.
+  - The ML model's own uncertainty only measures "how far am I from my
+    training data", not "how wrong is the simulator". Phase 5 accuracy
+    needs the second.
+
+Unchanged from the roadmap's Phase 5: score all 231 mixes, ~500 Monte
+Carlo runs, accuracy = % of runs reaching >= 85% of that run's best,
+merge near-duplicates, always show best overall / best 2-pigment / best
+single, warn when the top pick's accuracy is low, fixed random seed.
+
+
+CHANGE 2  The ML model becomes a correction learned from real cells
+--------------------------------------------------------------------
+Before: Phase 4 = train ML on simulated data, plus an empty
+        "residual-correction slot" filled in Phase 7.
+Now:    The correction IS the ML model, built after Phase 7:
+
+          prediction = simulator(conditions) x correction(conditions)
+
+  - A Gaussian process learns log(measured / simulated) from real cells.
+  - Capped at -33% / +50%, so ML can never produce an unrealistic cell.
+  - Where there is no real data it fades to x1.0 (pure physics).
+  - Its uncertainty feeds the Monte Carlo, so "accuracy" includes how
+    much we trust the physics for that mix and light.
+  - If one effect keeps appearing (e.g. a pigment pair interacting), it
+    moves into the physics as a new setting, not left to the ML.
+Full recipe: CALIBRATION_STEPS.txt, Step 10.
+
+The Phase 4 comparison script stays, with one extra option: compare
+  1. simulator alone   2. real-only ML   3. hybrid (simulator x correction)
+  (4. optional: ML trained on simulated data only, the old plan)
+tested on real cells the model never saw (leave one mix out at a time).
+
+Why this suits the project: you will have roughly 100-200 real
+measurements of about 7 mixes. That is far too few for ML alone (it
+cannot predict the other 224 mixes) but plenty for a few physical
+settings plus a small, smooth correction. In the report this is
+"physics-informed machine learning".
+
+
+CHANGE 3  Phase 6 web app built now, not "optional v2"
+-------------------------------------------------------
+Both interfaces exist and run on the simulator today:
+  Command line:  .venv/bin/python -m app.predict --lat 3.14 --lon 101.69
+  Web app:       .venv/bin/python -m app.web   (opens http://127.0.0.1:8000)
+
+The web app (Python standard library only, no Streamlit needed):
+  - pick a location on a map of Malaysia, from a city list, or by typing
+  - live conditions, the three recommended mixes, top 10 distinct mixes
+    with efficiency range and accuracy, a triangle chart of all 231
+    mixes, and the sunlight spectrum
+  - at night it offers the next daylight hour (forecast weather)
+  - shows a "placeholder settings" notice until the simulator is
+    calibrated, and the low-confidence warning when it applies
+  - only reachable from your own computer; needs internet for the
+    weather and the map
+  - links like http://127.0.0.1:8000/?lat=3.14&lon=101.69 run directly
+
+After the experiment nothing in the app has to change: calibration
+updates the simulator underneath, and the Step 10 correction plugs into
+model/recommend.py.
+
+
+CHANGE 4  What the Monte Carlo varies
+--------------------------------------
+Each of the 500 runs nudges, within 1-sigma placeholder values in
+model/recommend.py (UNCERTAINTY):
+  total sunlight ±10%, spectrum colour (bluer/redder) ±10%,
+  cell temperature ±3 °C, each pigment's success rate ±15%.
+After Phase 7 these come from measurements (CALIBRATION_STEPS.txt 10a),
+plus the ML correction's own uncertainty.
+
+Deliberately NOT included: separate random cell-to-cell noise per mix.
+The target compares average cells; independent noise on 231 mixes turns
+each run's "best" into the luckiest cell, which pushed even the clear
+winner down to ~40% accuracy in testing. Cell-to-cell variation is still
+measured (Phase 7) and used as the ML correction's noise level and as
+the floor when judging Phase 8 results.
+
+
+CHANGE 5  Phase 3 details that differ from the roadmap
+-------------------------------------------------------
+  - Anthocyanin spectrum: PhotochemCAD has no anthocyanin. We use a
+    cyanidin-3-glucoside spectrum digitized from an openly licensed
+    (CC BY 4.0) Mendeley Data image; chlorophyll a and curcumin are from
+    PhotochemCAD as planned. All are placeholders until Phase 7.
+    Sources and method: cell/spectra/SOURCES.md.
+  - Literature table: you fill data/literature_cells.csv from papers;
+    python -m cell.calibrate fits to it and prints the checkpoint.
+    Until it has rows, the simulator uses textbook values (every
+    pigment's success rate 20%), so pigment-vs-pigment rankings are
+    not yet trustworthy.
+  - Simulated dataset (data/sim/sim_dataset.csv, 150,150 rows): no
+    longer needed to train the recommender. It is kept for checking the
+    simulator, the Phase 8 sensitivity test, and option 4 of the
+    comparison. It is rebuilt with python -m cell.generate and not
+    stored in git (49 MB).
+
+
+CHANGE 6  Smaller notes on Phases 1-2
+--------------------------------------
+  - Phase 1 Step 5 (correction from AS7341 readings) waits for the
+    calibrated sensor; Phase 1's checkpoint waits with it.
+  - AS7341 bands are approximated as centre ± half-width from memory of
+    the datasheet; check against the datasheet and use its real response
+    curves once the sensor is calibrated.
+  - "Inside Malaysia" is checked with two rectangles, so border strips of
+    Thailand, Singapore, Brunei and Kalimantan also pass.
+  - Live satellite sunlight only covers up to today; future hours (e.g.
+    next morning) automatically use forecast sunlight.
+  - Phase 2 cell temperature uses the Ross rule with k = 0.0208, as
+    planned; it assumes a light breeze and flat-ground sunlight.
+
+
+NEW STATUS AND ORDER
+--------------------
+  Phase 0  Setup                          done
+  Phase 1  Environment (coords -> light)   done, except Step 5 (needs sensor)
+  Phase 2  Cell temperature               done (placeholder constant)
+  Phase 3  Simulator + dataset            done; waiting for literature table
+  Phase 5  Recommendation engine          done, on the simulator
+  Phase 6  Command line + web app         done
+  Phase 7  Lab experiment                 next; then CALIBRATION_STEPS.txt 1-9
+  Phase 4  ML correction                  after Phase 7 (CALIBRATION_STEPS.txt 10)
+  Phase 8  Validation                     as planned, on the corrected model
+  Phase 9  Report and clean-up            as planned; add the method above
+
+
+RISKS THIS ADDS OR CHANGES
+--------------------------
+  - The plan now relies on the simulator being roughly right. Step 7 of
+    CALIBRATION_STEPS.txt (interaction gaps) is the test: small,
+    systematic gaps are fine; large, erratic ones mean more cells or
+    better physics before the correction can help.
+  - The ML part of the project now happens late. Leave time after
+    Phase 7 for Step 10 (building, testing and comparing the correction).
+  - Until calibration, the app's rankings mostly reflect absorption
+    shape, not real pigment performance. Do not quote them as results.

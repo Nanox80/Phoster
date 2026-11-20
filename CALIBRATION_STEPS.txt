@@ -1,0 +1,364 @@
+CALIBRATING THE SIMULATOR AND ML MODEL FROM YOUR OWN CELLS
+==========================================================
+
+Phase 7 of the roadmap: replace every published / textbook placeholder with
+your own measurements, then rebuild the dataset and the model.
+
+Do the steps in order: each one fixes a number the next step depends on.
+Run every command from the Phoster folder.
+
+Marked [EXISTS]       = the code is already there, just run it.
+Marked [TO BUILD]     = needs a small code change first; it says exactly what.
+The recommender and web app already run on the simulator. Every step
+below improves them automatically; nothing in the app needs changing
+until Step 10 adds the ML correction.
+
+
+-------------------------------------------------------------------------
+STEP 0  Before you start: record data in one consistent format
+-------------------------------------------------------------------------
+
+Prerequisite: the AS7341 must be calibrated (against the school
+spectrometer or a known lamp) so its 8 channels read in W/m^2, not raw
+counts. Without that, none of the light measurements below can be trusted.
+
+Keep ONE file, data/real/cells.csv, one row per measurement
+(one cell, under one light, at one temperature). Columns:
+
+  source            always "real"
+  cell_id           e.g. AB-2  (mix AB, repeat 2)
+  date
+  pct_chlorophyll   0-100   (the three must add up to 100)
+  pct_anthocyanin   0-100
+  pct_curcumin      0-100
+  area_cm2          active area of the cell (the dyed TiO2 square)
+  light_name        e.g. "white lamp", "red LED", "sun 12:30"
+  F1_415nm ... F8_680nm   calibrated AS7341 reading in W/m^2, taken AT THE
+                          SAME TIME and same position as the cell
+  sunlight_w_m2     total light on the cell (pyranometer / lux meter
+                    converted / sum estimated from the lamp spectrum)
+  air_temp_c
+  cell_temp_c       thermometer taped to the back of the glass
+  voc_v             open-circuit voltage
+  isc_ma            short-circuit current (mA)
+  pmax_mw           max power from the I-V sweep (resistor set / INA226)
+  notes
+
+These names match data/sim/sim_dataset.csv on purpose, so real and
+simulated rows can be compared column-for-column. Never put real rows in
+data/sim/ or simulated rows in data/real/.
+
+For each test LIGHT (not each cell) also save its full spectrum once:
+data/real/lights/<light_name>.txt, two tab-separated columns
+"wavelength nm" and "W/m^2/nm" (from the school spectrometer, or the
+manufacturer's spectrum scaled so its AS7341 bands match your readings).
+The simulator needs the full spectrum; 8 bands are not enough for it.
+
+
+-------------------------------------------------------------------------
+STEP 1  Absorption spectra (replaces PhotochemCAD + the digitized image)
+-------------------------------------------------------------------------
+
+Measure: each extract's absorption spectrum on the UV-Vis
+spectrophotometer, 350-800 nm, after diluting all three to the SAME
+strength (the strength you will actually use to dye the cells).
+Best of all: measure the dyed TiO2 film itself, since pigments shift
+on TiO2.
+
+Put it in: cell/spectra/, replacing the old file, same format:
+  - first line is a header (any text)
+  - then two tab-separated columns: wavelength (nm), absorbance
+  Files: chlorophyll_a.txt, anthocyanin_c3g.txt, curcumin.txt
+  (or keep your own names and change SPECTRA_FILES in cell/simulator.py)
+
+Also set "peak_absorbance" (Step 4's calibration.json) to the absorbance
+your dyed film has at its peak. The code rescales each file so its
+peak = 1, then multiplies by peak_absorbance.
+
+Update cell/spectra/SOURCES.md to say these are your measurements.
+
+Check [EXISTS]:
+  .venv/bin/python -m unittest tests/test_simulator.py
+  test_absorption_peaks checks the old peak positions (666 / 522 / 425 nm).
+  If your peaks are elsewhere, change those three numbers in the test to
+  your measured peaks; that is expected, not a bug.
+
+
+-------------------------------------------------------------------------
+STEP 2  Cell area
+-------------------------------------------------------------------------
+
+Measure: the active (dyed) area of your cells in cm^2.
+Put it in: "area_cm2" in cell/calibration.json (see Step 4 for how to
+create that file). Efficiency depends directly on it.
+
+
+-------------------------------------------------------------------------
+STEP 3  Cell-temperature rule (Phase 2)
+-------------------------------------------------------------------------
+
+Measure: during real-sun tests, at the same moment: air temperature,
+cell temperature (back of the glass), total sunlight (W/m^2).
+Wait a few minutes in steady sun before each reading.
+
+Work out, for every reading:
+    k = (cell_temp_c - air_temp_c) / sunlight_w_m2
+Take the average k of all readings (ignore readings under 200 W/m^2,
+they are mostly noise).
+
+Put it in: K = ... in cell/temperature.py (currently 0.0208).
+
+Check [EXISTS]:
+  .venv/bin/python -m unittest tests/test_cell_temperature.py
+  test_strong_sun_heats_cell expects 52.8 C for k = 0.0208; update that
+  number to 32 + 1000 * your_k.
+
+
+-------------------------------------------------------------------------
+STEP 4  Create your own calibration file
+-------------------------------------------------------------------------
+
+All simulator settings live in DEFAULTS in cell/simulator.py. If the file
+cell/calibration.json exists, its values override the defaults. Create it
+once from the defaults [EXISTS]:
+
+  .venv/bin/python -c "import json; from cell.simulator import DEFAULTS; open('cell/calibration.json','w').write(json.dumps(DEFAULTS, indent=2))"
+
+Then edit the numbers in that file by hand for Steps 2, 5 and 6.
+(Note: "success_rate" is replaced as a whole, so always keep all three
+pigments in it.)
+
+
+-------------------------------------------------------------------------
+STEP 5  How fast voltage drops with heat ("eg_ev")
+-------------------------------------------------------------------------
+
+Measure: the same cell, under the same light, at room temperature and at
+about 40 C (roadmap: "Test at 2 temperatures"). Do this for a few cells.
+
+Work out: your slope = (Voc_hot - Voc_room) / (T_hot - T_room)
+in mV per degree C. Typical DSSC: about -2 to -3 mV/C.
+
+Simulator's slope with the current setting [EXISTS]:
+
+  .venv/bin/python -c "from cell.simulator import *; import numpy as np; nm,g=reference_sun(); s=np.eye(3); a=simulate(nm,g,1000,25,s)['voc_v']; b=simulate(nm,g,1000,40,s)['voc_v']; print(((b-a)/15*1000).round(2).tolist(), 'mV per C')"
+
+Change "eg_ev" in cell/calibration.json and rerun until the printed slope
+matches yours. A LOWER eg_ev gives a GENTLER slope
+(0.55 gives about -2.5 mV/C).
+
+
+-------------------------------------------------------------------------
+STEP 6  Fit the simulator to your single-pigment cells (AA, BB, CC)
+-------------------------------------------------------------------------
+
+This sets each pigment's success rate and the shared diode settings
+(saturation current, series and shunt resistance).
+
+[EXISTS] python -m cell.calibrate already does this fit, but it assumes
+every cell was measured under standard sun (AM1.5G, 1000 W/m^2), which
+is how the published cells in data/literature_cells.csv were measured.
+Your cells were measured under lamps, LEDs and real sun, so:
+
+[TO BUILD] Extend cell/calibrate.py so it can also read
+data/real/cells.csv and simulate each real cell under ITS OWN light file
+(data/real/lights/<light_name>.txt), its own sunlight_w_m2 and its own
+cell_temp_c, instead of reference_sun() at 25 C. The fit itself
+(fit() + least_squares) stays the same, it just compares against each
+real measurement instead of the published medians.
+(Ask Claude: "extend cell/calibrate.py to fit to data/real/cells.csv
+using each row's measured light spectrum".)
+
+Then run:
+  .venv/bin/python -m cell.calibrate
+It writes cell/calibration.json (keep your area_cm2, eg_ev and
+peak_absorbance from Steps 1, 2 and 5; check they are still there).
+
+Good result: the printed checkpoint table shows simulated values inside
+the range of your 3 repeats for each pigment and light.
+
+
+-------------------------------------------------------------------------
+STEP 7  Check against your MIXED cells (AB, AC, BC, ABC): interaction gaps
+-------------------------------------------------------------------------
+
+The simulator assumes pigments do not affect each other in a mix. Your
+mixed cells test that.
+
+For every mixed cell measurement, simulate the same mix under the same
+light and temperature, then work out:
+    gap = measured_pmax / simulated_pmax
+  gap about 1.0   -> no interaction, nothing to change
+  gap < 1         -> the mix does worse than its parts (e.g. pigments
+                     competing for space on the TiO2)
+  gap > 1         -> the mix does better than expected
+
+Record every gap in a table for the report (mix, light, gap).
+If one pair is consistently off (e.g. AB always about 0.8), that is a
+real finding. Do NOT tune the single-pigment settings to hide it; it gets
+corrected in Step 10 instead.
+
+
+-------------------------------------------------------------------------
+STEP 8  Cell-to-cell variation (the accuracy floor)
+-------------------------------------------------------------------------
+
+For each mix + light, from your 3 repeats:
+    variation = standard deviation of pmax / mean of pmax
+No model can predict more precisely than this. If it is above about 15%,
+build more repeats (roadmap risk list).
+
+Where it is used: as the noise level of the ML correction in Step 10
+(so the model does not chase random scatter) and as the floor when you
+judge results in Phase 8. It is NOT added as separate random noise to
+each mix in the recommender's Monte Carlo: the target compares AVERAGE
+cells, and independent noise on 231 mixes makes each run's "best mix"
+just the luckiest one, which unfairly lowers every mix's accuracy.
+
+
+-------------------------------------------------------------------------
+STEP 9  Rebuild the simulated dataset with the calibrated simulator
+-------------------------------------------------------------------------
+
+[EXISTS]
+  .venv/bin/python -m cell.generate
+It automatically uses cell/calibration.json and the new spectra files.
+About one minute; overwrites data/sim/sim_dataset.csv.
+
+Quick sanity check: the single-pigment rows in strong sun should now
+look like your real single-pigment cells in strong sun.
+
+
+-------------------------------------------------------------------------
+STEP 10  Build the ML model from your experimental data
+-------------------------------------------------------------------------
+
+The design (see PLAN_CHANGES.txt): the calibrated SIMULATOR stays the
+core of every prediction. The ML model only learns a small, capped
+correction from your real cells:
+
+    prediction = simulator(mix, light, cell temp) x correction(mix, light, cell temp)
+
+Where you have no real data (a mix or light you never tested), the
+correction fades back to x1.0, i.e. pure physics. So results can never
+become unrealistic, and every number still obeys the physics.
+
+[TO BUILD] two small pieces of code:
+  - model/correction.py   trains and loads the correction (Steps 10b-10d)
+  - a hook in model/recommend.py that applies it in every Monte Carlo
+    run (Step 10e)
+(Ask Claude: "build model/correction.py and hook it into the
+recommender as described in CALIBRATION_STEPS.txt Step 10".)
+
+10a  How sure are the calibrated settings?  (bootstrap)
+     Repeat the Step 6 fit about 200 times. Each time, rebuild the
+     dataset by picking cells at random WITH replacement (so some
+     repeats appear twice, some not at all). Every fit gives slightly
+     different success rates. Their spread is your real uncertainty:
+       for each pigment: spread = standard deviation of log(success_rate)
+     Put the average spread into UNCERTAINTY["success_rate"] in
+     model/recommend.py (currently a 0.15 placeholder).
+     Also replace the other placeholders there with measured values:
+       "sunlight"     the AS7341 / pyranometer error vs the spectrometer
+       "colour_tilt"  the Phase 1 Step 5 error per colour band
+       "cell_temp_c"  the scatter of your Step 3 temperature readings
+
+10b  Make the training table (one row per REAL measurement)
+     For every row of data/real/cells.csv, run the calibrated simulator
+     for the same mix, the same light file, sunlight and cell
+     temperature, and record:
+       target = log( measured_pmax / simulated_pmax )
+     0 means the physics was exactly right; -0.2 means the real cell
+     made about 18% less power than predicted.
+     Inputs for each row (keep them few):
+       - pct_chlorophyll, pct_anthocyanin, pct_curcumin   (divide by 100)
+       - light COLOUR: the 8 AS7341 bands divided by their total
+         (the shape of the light, not its brightness)
+       - cell_temp_c
+     Save it as data/real/residuals.csv (still real data, so it stays
+     in data/real/).
+
+10c  Train the correction: a Gaussian process (scikit-learn,
+     GaussianProcessRegressor), because it:
+       - is accurate with small data (100-200 rows),
+       - returns 0 (= no correction) far from any training data,
+       - reports its own uncertainty.
+     Settings:
+       kernel = ConstantKernel * RBF(one length scale per input)
+                + WhiteKernel(noise_level = (Step 8 variation)^2)
+       normalize_y = False   (keeps the "fall back to 0" behaviour)
+     Save the trained model to model/correction.joblib.
+
+10d  Cap it. Clip the correction to between log(0.67) and log(1.5),
+     i.e. the ML may change a prediction by at most -33% / +50%.
+     If many predictions hit the cap, the physics is missing something
+     big: go to Step 10g instead of loosening the cap.
+
+10e  Use it in the recommender. In every Monte Carlo run:
+       - draw the success rates from the 10a spread,
+       - simulate all 231 mixes,
+       - draw ONE sample of the correction for all 231 mixes together
+         (gp.sample_y on the 231 inputs: the sample is smooth across
+         similar mixes, so it does not cause the "luckiest mix" problem
+         from Step 8),
+       - multiply: efficiency x exp(clipped correction sample).
+     The web app and command line pick this up automatically.
+
+10f  Test it fairly (this is roadmap Phase 4's comparison script).
+     Use only REAL cells, and never test on data the model trained on:
+       - leave-one-MIX-out: train without every measurement of one mix
+         (e.g. all AB cells), predict that mix, repeat for each mix.
+         This is the honest test, because the app recommends mixes you
+         never built.
+     Compare four ways of predicting:
+       1. simulator alone (calibrated, no correction)
+       2. real-only ML (the same Gaussian process, no simulator inside)
+       3. hybrid (simulator x correction)            <- expected winner
+       4. (optional) the old idea: an ML model trained on sim data only
+     Report for each: average error in Pmax (%), and how often its top
+     pick for each test light reaches >= 85% of the best measured mix.
+     Keep the most accurate on held-out cells; report all of them in the
+     CREST report.
+
+10g  If one effect keeps showing up (e.g. AB mixes always about 0.8x),
+     move it into the physics instead of leaving it to the ML: add an
+     "interaction factor" for that pigment pair to cell/simulator.py and
+     fit it in Step 6. Then retrain the correction (10b-10d); it should
+     now be smaller. A small, patternless correction is the sign of a
+     good simulator.
+
+
+-------------------------------------------------------------------------
+STEP 11  Then: Phase 8 validation
+-------------------------------------------------------------------------
+
+Only after Steps 1-10: pick 4-6 new test lights, ask the tool for its top
+pick, build and measure it (3 repeats), and check it reaches >= 85% of
+the best measured mix. See the roadmap, Phase 8.
+
+
+-------------------------------------------------------------------------
+QUICK REFERENCE: what each measurement replaces
+-------------------------------------------------------------------------
+
+  Your measurement                   Replaces                      Where
+  ---------------------------------  ----------------------------  -----------------------------
+  Extract absorption spectra         PhotochemCAD + digitized C3G  cell/spectra/*.txt
+  Dyed film peak absorbance          1.0 placeholder               calibration.json peak_absorbance
+  Active cell area                   1 cm^2 placeholder            calibration.json area_cm2
+  Cell vs air temp in sun            Ross k = 0.0208               cell/temperature.py K
+  Voc at 2 temperatures              eg_ev = 0.55                  calibration.json eg_ev
+  Single-pigment cells               20% success rates, diode      calibration.json (cell.calibrate)
+  Mixed cells                        "no interactions" assumption  gap table -> correction / 10g
+  Repeats (cell-to-cell variation)   (nothing yet)                 correction noise, Phase 8 floor
+  Bootstrap of the Step 6 fit        success_rate 0.15             model/recommend.py UNCERTAINTY
+  Sensor / temperature errors        sunlight, tilt, temp guesses  model/recommend.py UNCERTAINTY
+  All real cells                     (no correction)               model/correction.joblib
+
+After ANY change: run all tests
+  .venv/bin/python -m unittest tests/test_*.py
+
+Then open the app and check a few locations still give sensible picks:
+  .venv/bin/python -m app.web
+The blue "placeholder settings" banner disappears once
+cell/calibration.json exists.

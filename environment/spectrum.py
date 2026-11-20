@@ -50,7 +50,7 @@ def spectrum_from_weather(lat, lon, when, weather):
     airmass = pvlib.atmosphere.get_relative_airmass(zenith, model="kastenyoung1989")
 
     pw = weather.get("total_column_integrated_water_vapour")
-    pw_cm = pw / 10 if pw is not None else float(
+    pw_cm = pw / 10 if pd.notna(pw) else float(
         pvlib.atmosphere.gueymard94_pw(weather["temperature_2m"], weather["relative_humidity_2m"]))
     aod_500 = pvlib.atmosphere.angstrom_aod_at_lambda(weather["aod_550nm"], 550, lambda1=500)
 
@@ -102,16 +102,21 @@ def ground_spectrum(lat, lon, when=None):
 
 COLOURS = {"violet": (400, 450), "blue": (450, 495), "green": (495, 570), "yellow": (570, 590),
            "orange": (590, 620), "red": (620, 750), "near-IR": (750, 800)}
+# AS7341 channels F1-F8 as centre ± half the datasheet FWHM (nm).
+# shortcut: real channel responses are bell-shaped; use the datasheet curves once the sensor is calibrated (Phase 1 Step 5).
+AS7341_BANDS = {f"F{i}_{c}nm": (c - w / 2, c + w / 2) for i, (c, w) in enumerate(
+    [(415, 26), (445, 30), (480, 36), (515, 39), (555, 39), (590, 40), (630, 50), (680, 52)], start=1)}
 LOCAL_TZ = "Asia/Kuala_Lumpur"
 
 
-def colour_bands(df):
-    """W/m² of light in each named colour band."""
-    # SPECTRL2 points are 10-25 nm apart (none inside 570-590), so interpolate to 1 nm first.
-    nm = np.arange(400, 801)
-    total = np.interp(nm, df.index.values, df["total"].values)
-    return pd.Series({name: np.trapezoid(total[lo - 400:hi - 399], nm[lo - 400:hi - 399])
-                      for name, (lo, hi) in COLOURS.items()})
+def colour_bands(df, bands=COLOURS):
+    """W/m² of light in each band {name: (lo_nm, hi_nm)}."""
+    # SPECTRL2 points are 10-25 nm apart (none inside 570-590), so interpolate finely first.
+    out = {}
+    for name, (lo, hi) in bands.items():
+        nm = np.linspace(lo, hi, int(hi - lo) + 1)
+        out[name] = np.trapezoid(np.interp(nm, df.index.values, df["total"].values), nm)
+    return pd.Series(out)
 
 
 def main(argv=None):
