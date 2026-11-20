@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pvlib
 
+from cell.temperature import cell_temperature
 from environment.weather import fetch_weather
 
 # Typical tropical values (placeholders; refine if better local data is found).
@@ -134,8 +135,10 @@ def main(argv=None):
     print(f"Location: {a.lat}, {a.lon}  |  {out['time'].tz_convert(LOCAL_TZ):%Y-%m-%d %H:%M} Malaysia time")
     print(f"Sun {out['sun_elevation']:.0f}° up  |  {w['temperature_2m']} °C air  |  "
           f"{w['cloud_cover']}% cloud  |  haze (AOD) {w['aod_550nm']}")
+    sunlight = w["direct_radiation"] + w["diffuse_radiation"]
     print(f"Sunlight: direct {w['direct_radiation']:.0f} W/m², diffuse {w['diffuse_radiation']:.0f} W/m² "
-          f"({w['radiation_source']})\n")
+          f"({w['radiation_source']})")
+    print(f"Estimated cell temperature: {cell_temperature(w['temperature_2m'], sunlight):.1f} °C\n")
     print(f"{'Colour':<8} {'nm':>9} {'W/m²':>7} {'share':>6}")
     for name, value in bands.items():
         lo, hi = COLOURS[name]
